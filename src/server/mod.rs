@@ -86,9 +86,10 @@ impl<B: AsRef<[u8]> + 'static> Http<B> {
     /// The returned `Server` contains one method, `run`, which is used to
     /// actually run the server.
     pub fn bind<S, Bd>(&self, addr: &SocketAddr, new_service: S) -> ::Result<Server<S, Bd>>
-        where S: NewService<Request = Request, Response = Response<Bd>, Error = ::Error> +
-                    Send + Sync + 'static,
-              Bd: Stream<Item=B, Error=::Error>,
+        where S: NewService<Request = (Request, Handle),
+                            Response = Response<Bd>,
+                            Error = ::Error> + Send + Sync + 'static,
+              Bd: Stream<Item = B, Error = ::Error>
     {
         let core = try!(Core::new());
         let handle = core.handle();
@@ -118,18 +119,21 @@ impl<B: AsRef<[u8]> + 'static> Http<B> {
     /// however, when writing mocks or accepting sockets from a non-TCP
     /// location.
     pub fn bind_connection<S, I, Bd>(&self,
-                                 handle: &Handle,
-                                 io: I,
-                                 remote_addr: SocketAddr,
-                                 service: S)
-        where S: Service<Request = Request, Response = Response<Bd>, Error = ::Error> + 'static,
-              Bd: Stream<Item=B, Error=::Error> + 'static,
-              I: AsyncRead + AsyncWrite + 'static,
+                                     handle: &Handle,
+                                     io: I,
+                                     remote_addr: SocketAddr,
+                                     service: S)
+        where S: Service<Request = (Request, Handle), Response = Response<Bd>, Error = ::Error> + 'static,
+              Bd: Stream<Item = B, Error = ::Error> + 'static,
+              I: AsyncRead + AsyncWrite + 'static
     {
-        self.bind_server(handle, io, HttpService {
-            inner: service,
-            remote_addr: remote_addr,
-        })
+        self.bind_server(handle,
+                         io,
+                         HttpService {
+                             inner: service,
+                             remote_addr: remote_addr,
+                             handle: handle.clone(),
+                         })
     }
 }
 
@@ -301,14 +305,15 @@ impl<B> Into<Message<__ProtoResponse, B>> for Response<B> {
 struct HttpService<T> {
     inner: T,
     remote_addr: SocketAddr,
+    handle: Handle,
 }
 
 type ResponseHead = http::MessageHead<::StatusCode>;
 
 impl<T, B> Service for HttpService<T>
-    where T: Service<Request=Request, Response=Response<B>, Error=::Error>,
-          B: Stream<Error=::Error>,
-          B::Item: AsRef<[u8]>,
+    where T: Service<Request = (Request,Handle), Response = Response<B>, Error = ::Error>,
+          B: Stream<Error = ::Error>,
+          B::Item: AsRef<[u8]>
 {
     type Request = Message<__ProtoRequest, http::TokioBody>;
     type Response = Message<__ProtoResponse, B>;
@@ -321,12 +326,12 @@ impl<T, B> Service for HttpService<T>
             Message::WithBody(head, body) => (head.0, body.into()),
         };
         let req = request::from_wire(Some(self.remote_addr), head, body);
-        self.inner.call(req).map(Into::into)
+        self.inner.call((req,self.handle.clone())).map(Into::into)
     }
 }
 
 impl<S, B> Server<S, B>
-    where S: NewService<Request = Request, Response = Response<B>, Error = ::Error>
+    where S: NewService<Request = (Request, Handle), Response = Response<B>, Error = ::Error>
                 + Send + Sync + 'static,
           B: Stream<Error=::Error> + 'static,
           B::Item: AsRef<[u8]>,
