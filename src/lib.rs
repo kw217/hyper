@@ -37,6 +37,7 @@ extern crate tokio_core as tokio;
 extern crate tokio_proto;
 extern crate tokio_service;
 extern crate unicase;
+extern crate net2;
 
 #[cfg(all(test, feature = "nightly"))]
 extern crate test;

@@ -6,6 +6,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+use std::net::IpAddr;
 
 use futures::{Async, Future, Poll, Stream};
 use futures::future::{self, Executor};
@@ -421,6 +422,7 @@ pub struct Config<C, B> {
     max_idle: usize,
     retry_canceled_requests: bool,
     set_host: bool,
+    local_address: Option<IpAddr>,
 }
 
 /// Phantom type used to signal that `Config` should create a `HttpConnector`.
@@ -438,6 +440,7 @@ impl Default for Config<UseDefaultConnector, proto::Body> {
             max_idle: 5,
             retry_canceled_requests: true,
             set_host: true,
+            local_address: None,
         }
     }
 }
@@ -463,6 +466,7 @@ impl<C, B> Config<C, B> {
             max_idle: self.max_idle,
             retry_canceled_requests: self.retry_canceled_requests,
             set_host: self.set_host,
+            local_address: self.local_address,
         }
     }
 
@@ -478,6 +482,7 @@ impl<C, B> Config<C, B> {
             max_idle: self.max_idle,
             retry_canceled_requests: self.retry_canceled_requests,
             set_host: self.set_host,
+            local_address: self.local_address,
         }
     }
 
@@ -549,6 +554,21 @@ impl<C, B> Config<C, B> {
     pub fn no_proto(self) -> Config<C, B> {
         self
     }
+
+    /// Set whether to automatically add the `Host` header to requests.
+    ///
+    /// If true, and a request does not include a `Host` header, one will be
+    /// added automatically, derived from the authority of the `Uri`.
+    ///
+    /// Default is `true`.
+    #[inline]
+    pub fn set_local_address(mut self, val: Option<IpAddr>) -> Config<C, B> {
+        self.local_address = val;
+        self
+    }
+
+
+
 }
 
 impl<C, B> Config<C, B>
@@ -584,6 +604,9 @@ where B: Stream<Error=::Error>,
         let mut connector = HttpConnector::new(4, handle);
         if self.keep_alive {
             connector.set_keepalive(self.keep_alive_timeout);
+        }
+        if self.local_address.is_some() {
+            connector.set_local_address(self.local_address);
         }
         self.connector(connector).build(handle)
     }
