@@ -14,17 +14,20 @@ use std::io;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use futures::task::{self, Task};
 use futures::future::{self};
 use futures::{Future, Stream, Poll, Async};
+use net2;
 
 #[cfg(feature = "compat")]
 use http;
 
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio::reactor::{Core, Handle, Timeout};
+use tokio::reactor::{Core, Handle, Interval, Timeout};
 use tokio::net::TcpListener;
 pub use tokio_service::{NewService, Service};
 
@@ -60,7 +63,7 @@ pub struct Http<B = ::Chunk> {
     keep_alive: bool,
     pipeline: bool,
     sleep_on_errors: bool,
-    _marker: PhantomData<B>,
+    _marker: PhantomData<fn() -> B>,
 }
 
 /// An instance of a server created through `Http::bind`.
@@ -178,7 +181,7 @@ impl<B: AsRef<[u8]> + 'static> Http<B> {
     {
         let core = try!(Core::new());
         let handle = core.handle();
-        let listener = try!(TcpListener::bind(addr, &handle));
+        let listener = try!(thread_listener(addr, &handle));
 
         Ok(Server {
             new_service: new_service,
@@ -389,6 +392,8 @@ impl<S, B> Server<S, B>
             incoming.set_keepalive(Some(Duration::from_secs(90)));
         }
 
+        date_render_interval(&handle);
+
         // Mini future to track the number of active services
         let info = Rc::new(RefCell::new(Info {
             active: 0,
@@ -443,6 +448,141 @@ impl<S, B> Server<S, B>
             Err((e, _)) => Err(e.into())
         }
     }
+}
+
+
+impl<S, B> Server<S, B>
+    where S: NewService<Request = Request, Response = Response<B>, Error = ::Error> + Send + Sync + 'static,
+          B: Stream<Error=::Error> + 'static,
+          B::Item: AsRef<[u8]>,
+{
+    /// Run the server on multiple threads.
+    #[cfg(unix)]
+    pub fn run_threads(self, threads: usize) {
+        assert!(threads > 0, "threads must be more than 0");
+
+        let Server {
+            protocol,
+            new_service,
+            reactor,
+            listener,
+            shutdown_timeout,
+        } = self;
+
+        let new_service = Arc::new(new_service);
+        let addr = listener.local_addr().unwrap();
+
+        let threads = (1..threads).map(|i| {
+            let protocol = protocol.clone();
+            let new_service = new_service.clone();
+            thread::Builder::new()
+                .name(format!("hyper-server-thread-{}", i))
+                .spawn(move || {
+                    let reactor = Core::new().unwrap();
+                    let listener = thread_listener(&addr, &reactor.handle()).unwrap();
+                    let srv = Server {
+                        protocol,
+                        new_service,
+                        reactor,
+                        listener,
+                        shutdown_timeout,
+                    };
+                    srv.run().unwrap();
+                })
+                .unwrap()
+        }).collect::<Vec<_>>();
+
+        let srv = Server {
+            protocol,
+            new_service,
+            reactor,
+            listener,
+            shutdown_timeout,
+        };
+        srv.run().unwrap();
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+}
+
+fn thread_listener(addr: &SocketAddr, handle: &Handle) -> io::Result<TcpListener> {
+    let listener = match *addr {
+        SocketAddr::V4(_) => try!(net2::TcpBuilder::new_v4()),
+        SocketAddr::V6(_) => try!(net2::TcpBuilder::new_v6()),
+    };
+    try!(reuse_port(&listener));
+    try!(listener.reuse_address(true));
+    try!(listener.bind(addr));
+    listener.listen(1024).and_then(|l| {
+        TcpListener::from_listener(l, addr, handle)
+    })
+}
+
+fn date_render_interval(handle: &Handle) {
+    // Since we own the executor, we can spawn an interval to update the
+    // thread_local rendered date, instead of checking the clock on every
+    // single response.
+    let mut date_interval = match Interval::new(Duration::from_secs(1), &handle) {
+        Ok(i) => i,
+        Err(e) => {
+            trace!("error spawning date rendering interval: {}", e);
+            // It'd be quite weird to error, but if it does, we
+            // don't actually need it, so just back out.
+            return;
+        }
+    };
+
+    let on_drop = IntervalDrop;
+
+    let fut =
+        future::poll_fn(move || {
+            try_ready!(date_interval.poll().map_err(|_| ()));
+            // If here, we were ready!
+            proto::date::update_interval();
+            // However, to prevent Interval from needing to clone its Task
+            // and check Instant::now() *again*, we just return NotReady
+            // always.
+            //
+            // The interval has already rescheduled itself, so it's a waste
+            // to poll the interval until it reports NotReady...
+            Ok(Async::NotReady)
+        })
+        .then(move |_: Result<(), ()>| {
+            // if this interval is ever dropped, the thread_local should be
+            // updated to know about that. Otherwise, starting a server on a
+            // thread, and then later closing it and then serving connections
+            // without a Server would mean the date would never be updated
+            // again.
+            //
+            // I know, I know, that'd be a super odd thing to do. But, just
+            // being careful...
+            drop(on_drop);
+            Ok(())
+        });
+
+    handle.spawn(fut);
+
+    struct IntervalDrop;
+
+    impl Drop for IntervalDrop {
+        fn drop(&mut self) {
+            proto::date::interval_off();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn reuse_port(tcp: &net2::TcpBuilder) -> io::Result<()> {
+    use net2::unix::*;
+    try!(tcp.reuse_port(true));
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reuse_port(_tcp: &net2::TcpBuilder) -> io::Result<()> {
+    Ok(())
 }
 
 impl<S: fmt::Debug, B: Stream<Error=::Error>> fmt::Debug for Server<S, B>

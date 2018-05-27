@@ -1,4 +1,4 @@
-#![doc(html_root_url = "https://docs.rs/hyper/0.11.25")]
+#![doc(html_root_url = "https://docs.rs/hyper/0.11.26")]
 #![deny(missing_docs)]
 #![deny(warnings)]
 #![deny(missing_debug_implementations)]
@@ -28,6 +28,7 @@ extern crate iovec;
 extern crate language_tags;
 #[macro_use] extern crate log;
 pub extern crate mime;
+extern crate net2;
 #[macro_use] extern crate percent_encoding;
 extern crate relay;
 extern crate time;
