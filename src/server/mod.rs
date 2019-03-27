@@ -841,15 +841,18 @@ mod addr_stream {
 
 // ===== SocketAddrService
 
-// This is used from `Server::run`, which captures the remote address
-// in this service, and then injects it into each `Request`.
-struct SocketAddrService<S> {
+/// Wrapper service which injects the indicated remote address into each
+/// `Request`. Used from `Server::run`.
+#[derive(Debug)]
+pub struct SocketAddrService<S> {
     addr: SocketAddr,
     inner: S,
 }
 
 impl<S> SocketAddrService<S> {
-    fn new(addr: SocketAddr, service: S) -> SocketAddrService<S> {
+    /// Create a new `SocketAddrService`, supplying the remote address
+    /// to be injected into each `Request`.
+    pub fn new(addr: SocketAddr, service: S) -> SocketAddrService<S> {
         SocketAddrService {
             addr: addr,
             inner: service,
